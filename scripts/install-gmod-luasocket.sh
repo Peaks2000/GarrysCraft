@@ -5,6 +5,7 @@ GMOD_DIR="${GMOD_DIR:-$HOME/gmod-ds}"
 WORK_DIR="${WORK_DIR:-/tmp/mcgm-luasocket}"
 TAG="${TAG:-r1}"
 BASE_URL="https://github.com/danielga/gmod_luasocket"
+AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
 
 usage() {
     cat <<EOF
@@ -24,6 +25,47 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
+run_as_root() {
+    if [[ "$(id -u)" == "0" ]]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -n "$@"
+    else
+        return 1
+    fi
+}
+
+install_package() {
+    local package="$1"
+
+    if [[ "$AUTO_INSTALL_DEPS" != "1" ]]; then
+        return 1
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        run_as_root apt-get update
+        DEBIAN_FRONTEND=noninteractive run_as_root apt-get install -y "$package"
+        return $?
+    fi
+
+    if command -v pacman >/dev/null 2>&1; then
+        run_as_root pacman -Sy --noconfirm "$package"
+        return $?
+    fi
+
+    if command -v dnf >/dev/null 2>&1; then
+        run_as_root dnf install -y "$package"
+        return $?
+    fi
+
+    if command -v yum >/dev/null 2>&1; then
+        run_as_root yum install -y "$package"
+        return $?
+    fi
+
+    return 1
+}
+
 if [[ ! -d "$GMOD_DIR/garrysmod" ]]; then
     cat >&2 <<EOF
 Could not find a Garry's Mod server at:
@@ -36,8 +78,18 @@ EOF
 fi
 
 if ! command -v wget >/dev/null 2>&1; then
+    echo "wget is missing; attempting automatic install..."
+    install_package wget || true
+fi
+
+if ! command -v wget >/dev/null 2>&1; then
     echo "wget is required for this installer." >&2
     exit 1
+fi
+
+if ! command -v unzip >/dev/null 2>&1; then
+    echo "unzip is missing; attempting automatic install..."
+    install_package unzip || true
 fi
 
 if ! command -v unzip >/dev/null 2>&1; then
@@ -73,5 +125,5 @@ Installed gmod_luasocket into:
   $GMOD_DIR/garrysmod/lua
 
 Restart your GMod server, then look for:
-  [MCGM] listening for Minecraft 1.12.2 clients on port 25565
+  [MCGM] listening for Minecraft 1.12.2 backend clients on 127.0.0.1:25566
 EOF

@@ -12,6 +12,9 @@ MC_PORT="${MC_PORT:-25565}"
 GAMEMODE="${GAMEMODE:-sandbox}"
 TICKRATE="${TICKRATE:-33}"
 INSTALL_MODE="${INSTALL_MODE:-symlink}"
+START_AUTH_PROXY="${START_AUTH_PROXY:-1}"
+AUTO_SETUP="${AUTO_SETUP:-1}"
+AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
 
 usage() {
     cat <<EOF
@@ -28,6 +31,11 @@ Environment variables:
   TICKRATE       srcds tickrate. Default: 33
   INSTALL_MODE   symlink or copy. Default: symlink
                  Existing addon folders are backed up automatically.
+  START_AUTH_PROXY
+                 1 to start the Minecraft online-mode auth proxy. Default: 1
+  AUTO_SETUP     1 to install/update missing server bits automatically. Default: 1
+  AUTO_INSTALL_DEPS
+                 1 to install missing tools when possible. Default: 1
 
 Examples:
   GMOD_DIR="$HOME/servers/gmod" ./scripts/run-gmod-bridge.sh
@@ -38,6 +46,65 @@ EOF
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     exit 0
+fi
+
+run_as_root() {
+    if [[ "$(id -u)" == "0" ]]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -n "$@"
+    else
+        return 1
+    fi
+}
+
+install_package() {
+    local package="$1"
+
+    if [[ "$AUTO_INSTALL_DEPS" != "1" ]]; then
+        return 1
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        run_as_root apt-get update
+        DEBIAN_FRONTEND=noninteractive run_as_root apt-get install -y "$package"
+        return $?
+    fi
+
+    if command -v pacman >/dev/null 2>&1; then
+        run_as_root pacman -Sy --noconfirm "$package"
+        return $?
+    fi
+
+    if command -v dnf >/dev/null 2>&1; then
+        run_as_root dnf install -y "$package"
+        return $?
+    fi
+
+    if command -v yum >/dev/null 2>&1; then
+        run_as_root yum install -y "$package"
+        return $?
+    fi
+
+    return 1
+}
+
+ensure_command() {
+    local command_name="$1"
+    local package_name="${2:-$1}"
+
+    if command -v "$command_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "$command_name is missing; attempting automatic install..."
+    install_package "$package_name" || true
+    command -v "$command_name" >/dev/null 2>&1
+}
+
+if [[ ! -d "$GMOD_DIR" && "$AUTO_SETUP" == "1" ]]; then
+    echo "GMod dedicated server missing; installing/updating automatically..."
+    GMOD_DIR="$GMOD_DIR" AUTO_INSTALL_DEPS="$AUTO_INSTALL_DEPS" "$ROOT_DIR/scripts/install-gmod-server.sh"
 fi
 
 if [[ ! -d "$GMOD_DIR" ]]; then
@@ -55,6 +122,11 @@ EOF
 fi
 
 SRCDS_RUN="$GMOD_DIR/srcds_run"
+if [[ ! -x "$SRCDS_RUN" && "$AUTO_SETUP" == "1" ]]; then
+    echo "srcds_run missing; installing/updating GMod dedicated server automatically..."
+    GMOD_DIR="$GMOD_DIR" AUTO_INSTALL_DEPS="$AUTO_INSTALL_DEPS" "$ROOT_DIR/scripts/install-gmod-server.sh"
+fi
+
 if [[ ! -x "$SRCDS_RUN" ]]; then
     cat >&2 <<EOF
 Could not execute:
@@ -101,6 +173,11 @@ else
     fi
 fi
 
+if [[ "$AUTO_SETUP" == "1" && ! -f "$GMOD_DIR/garrysmod/lua/bin/gmsv_socket.core_linux.dll" ]]; then
+    echo "LuaSocket module missing; installing automatically..."
+    GMOD_DIR="$GMOD_DIR" AUTO_INSTALL_DEPS="$AUTO_INSTALL_DEPS" "$ROOT_DIR/scripts/install-gmod-luasocket.sh"
+fi
+
 cat <<EOF
 MC+GM bridge ready.
 
@@ -121,8 +198,35 @@ GMod block controls:
 Starting srcds...
 EOF
 
+AUTH_PROXY_PID=""
+if [[ "$START_AUTH_PROXY" == "1" ]]; then
+    if ! ensure_command node nodejs; then
+        cat >&2 <<EOF
+Node.js is required for the Minecraft online-mode auth proxy.
+Automatic install could not complete. Install Node.js or run with START_AUTH_PROXY=0 for local backend testing only.
+EOF
+        exit 1
+    fi
+
+    echo "Starting Minecraft online-mode auth proxy..."
+    node "$ROOT_DIR/scripts/mc-auth-proxy.js" &
+    AUTH_PROXY_PID="$!"
+    sleep 0.25
+    if ! kill -0 "$AUTH_PROXY_PID" 2>/dev/null; then
+        echo "Minecraft online-mode auth proxy failed to start." >&2
+        exit 1
+    fi
+
+    cleanup_auth_proxy() {
+        if [[ -n "$AUTH_PROXY_PID" ]]; then
+            kill "$AUTH_PROXY_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_auth_proxy EXIT INT TERM
+fi
+
 cd "$GMOD_DIR"
-exec "$SRCDS_RUN" \
+"$SRCDS_RUN" \
     -game garrysmod \
     -console \
     -tickrate "$TICKRATE" \

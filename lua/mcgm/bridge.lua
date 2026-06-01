@@ -10,6 +10,7 @@ local proxyOwners = {}
 local sharedPlatform = {}
 local worldBlocks = {}
 local minecraftBlockEnts = {}
+local minecraftProfileCache = {}
 local nextEntityId = 9000
 local lastPosSync = 0
 local lastPropScan = 0
@@ -132,6 +133,50 @@ local function minecraftLookVector(yaw, pitch)
     local mcZ = math.cos(pitch) * math.cos(yaw)
 
     return Vector(mcX, mcZ, mcY):GetNormalized()
+end
+
+local function minecraftProxyAngle(client)
+    return Angle(0, (tonumber(client and client.yaw) or 0) + 90, 0)
+end
+
+local function applyMinecraftProxyHeadPose(client)
+    local ent = client and client.proxyEnt
+    if not IsValid(ent) then return end
+
+    local pitch = tonumber(client.pitch) or 0
+    local yaw = tonumber(client.yaw) or 0
+    local bodyYaw = minecraftProxyAngle(client).y
+    local localYaw = math.AngleDifference and math.AngleDifference(yaw + 90, bodyYaw) or 0
+    local lookDir = minecraftLookVector(yaw, pitch)
+
+    if ent.SetEyeTarget and client.gmodPos then
+        ent:SetEyeTarget(client.gmodPos + Vector(0, 0, 56) + lookDir * 256)
+    end
+
+    if ent.SetPoseParameter then
+        ent:SetPoseParameter("aim_pitch", -pitch)
+        ent:SetPoseParameter("head_pitch", -pitch)
+        ent:SetPoseParameter("aim_yaw", localYaw)
+        ent:SetPoseParameter("head_yaw", localYaw)
+        if ent.InvalidateBoneCache then ent:InvalidateBoneCache() end
+    end
+
+    if not ent.LookupBone or not ent.ManipulateBoneAngles then return end
+
+    local headBones = C.minecraft_proxy_head_bones or {}
+    local headAngle = Angle(
+        pitch * (C.minecraft_proxy_head_pitch_scale or 1),
+        localYaw * (C.minecraft_proxy_head_yaw_scale or 0.35),
+        0
+    )
+
+    for _, boneName in ipairs(headBones) do
+        local bone = ent:LookupBone(boneName)
+        if bone then
+            ent:ManipulateBoneAngles(bone, headAngle)
+            return
+        end
+    end
 end
 
 local function minecraftBlockToVec(x, y, z)
@@ -279,7 +324,7 @@ local function updateMinecraftProxy(client)
 
         ent:SetModel(C.minecraft_proxy_model)
         ent:SetPos(client.gmodPos)
-        ent:SetAngles(Angle(0, -(client.yaw or 0), 0))
+        ent:SetAngles(minecraftProxyAngle(client))
         ent:Spawn()
         ent:SetMoveType(MOVETYPE_NONE)
         ent:SetSolid(SOLID_BBOX)
@@ -306,7 +351,7 @@ local function updateMinecraftProxy(client)
     end
 
     client.proxyEnt:SetPos(client.gmodPos)
-    client.proxyEnt:SetAngles(Angle(0, -(client.yaw or 0), 0))
+    client.proxyEnt:SetAngles(minecraftProxyAngle(client))
     client.proxyEnt:SetCollisionBounds(C.minecraft_proxy_mins or Vector(-16, -16, 0), C.minecraft_proxy_maxs or Vector(16, 16, 72))
     client.proxyEnt:SetNWBool("MCGM_MinecraftProxy", C.enable_minecraft_nametags)
     client.proxyEnt:SetNWString("MCGM_Name", "[MC] " .. tostring(client.username or "Minecraft"))
@@ -315,10 +360,11 @@ local function updateMinecraftProxy(client)
     local phys = client.proxyEnt:GetPhysicsObject()
     if IsValid(phys) then
         phys:SetPos(client.gmodPos)
-        phys:SetAngles(Angle(0, -(client.yaw or 0), 0))
+        phys:SetAngles(minecraftProxyAngle(client))
         phys:EnableMotion(false)
         phys:Wake()
     end
+    applyMinecraftProxyHeadPose(client)
 
     if C.debug_minecraft_movement and (not client.nextMoveLog or CurTime() >= client.nextMoveLog) then
         client.nextMoveLog = CurTime() + 1
@@ -688,7 +734,7 @@ local function gmodPlaceBridgeBlock(ply)
     setWorldBlock(x, y, z, C.minecraft_build_block_state, true)
     resendSpawnChunksToMinecraft()
     broadcastBlockChange(x, y, z, C.minecraft_build_block_state)
-    log((IsValid(ply) and ply:Nick() or "Console") .. " placed block at " .. x .. "," .. y .. "," .. z)
+    log((IsValid(ply) and ply:Nick() or "Console") .. " placed bridge block at " .. x .. "," .. y .. "," .. z)
     return true
 end
 
@@ -711,7 +757,7 @@ local function gmodBreakBridgeBlock(ply)
 
     setWorldBlock(x, y, z, 0, true)
     broadcastBlockChange(x, y, z, 0)
-    log((IsValid(ply) and ply:Nick() or "Console") .. " broke block at " .. x .. "," .. y .. "," .. z)
+    log((IsValid(ply) and ply:Nick() or "Console") .. " broke bridge block at " .. x .. "," .. y .. "," .. z)
     return true
 end
 
@@ -788,6 +834,161 @@ local function shortPlayerName(prefix, name)
     return string.sub(prefix .. name, 1, 16)
 end
 
+local function profileUuidBytes(profile, fallbackSeed)
+    if profile and profile.uuidBytes then
+        return profile.uuidBytes
+    end
+    return P.writeUUIDBytes(fallbackSeed)
+end
+
+local function profileUuidString(profile)
+    return profile and profile.uuid or nil
+end
+
+local function writeProfileProperties(properties)
+    properties = properties or {}
+    local out = { P.writeVarInt(#properties) }
+
+    for _, property in ipairs(properties) do
+        out[#out + 1] = P.writeString(property.name or "")
+        out[#out + 1] = P.writeString(property.value or "")
+        if property.signature and property.signature ~= "" then
+            out[#out + 1] = P.writeBool(true)
+            out[#out + 1] = P.writeString(property.signature)
+        else
+            out[#out + 1] = P.writeBool(false)
+        end
+    end
+
+    return table.concat(out)
+end
+
+local function minecraftPlayerSkinParts(client)
+    local parts
+    if C.force_minecraft_skin_parts ~= false then
+        parts = tonumber(C.minecraft_default_skin_parts) or 127
+    else
+        parts = client and tonumber(client.skinParts)
+    end
+    if not parts then
+        parts = tonumber(C.minecraft_default_skin_parts) or 127
+    end
+
+    return math.max(0, math.min(255, math.floor(parts)))
+end
+
+local function minecraftPlayerMetadata(client)
+    return string.char(13) ..
+        P.writeVarInt(0) ..
+        string.char(minecraftPlayerSkinParts(client)) ..
+        "\255"
+end
+
+local function sendMinecraftPlayerMetadata(viewer, other)
+    if not viewer or not other or viewer == other then return end
+    if viewer.state ~= STATE_PLAY or other.state ~= STATE_PLAY then return end
+
+    sendPacket(viewer, 0x3C,
+        P.writeVarInt(other.entityId) ..
+        minecraftPlayerMetadata(other)
+    )
+end
+
+local function sendMinecraftSelfMetadata(client)
+    if not client or client.state ~= STATE_PLAY then return end
+
+    sendPacket(client, 0x3C,
+        P.writeVarInt(client.entityId) ..
+        minecraftPlayerMetadata(client)
+    )
+end
+
+local function completeMinecraftProfileRequest(cacheEntry, profile)
+    cacheEntry.loading = false
+    cacheEntry.profile = profile
+
+    for _, callback in ipairs(cacheEntry.callbacks or {}) do
+        callback(profile)
+    end
+    cacheEntry.callbacks = {}
+end
+
+local function fetchMinecraftProfile(username, callback)
+    if not C.enable_minecraft_profile_textures then
+        callback(nil)
+        return
+    end
+    if not http or not http.Fetch or not util or not util.JSONToTable then
+        callback(nil)
+        return
+    end
+
+    local safeName = string.sub(string.gsub(tostring(username or ""), "[^%w_]", ""), 1, 16)
+    if safeName == "" then
+        callback(nil)
+        return
+    end
+
+    local cacheKey = string.lower(safeName)
+    local cacheEntry = minecraftProfileCache[cacheKey]
+    if cacheEntry and cacheEntry.profile then
+        callback(cacheEntry.profile)
+        return
+    end
+
+    if cacheEntry and cacheEntry.loading then
+        cacheEntry.callbacks[#cacheEntry.callbacks + 1] = callback
+        return
+    end
+
+    cacheEntry = { loading = true, callbacks = { callback } }
+    minecraftProfileCache[cacheKey] = cacheEntry
+
+    local lookupBase = C.minecraft_profile_lookup_endpoint or "https://api.mojang.com/users/profiles/minecraft"
+    local textureBase = C.minecraft_profile_textures_endpoint or "https://sessionserver.mojang.com/session/minecraft/profile"
+
+    http.Fetch(lookupBase .. "/" .. safeName, function(body)
+        local lookup = util.JSONToTable(body or "")
+        local uuidBytes = lookup and P.writeUUIDString(lookup.id)
+        local uuid = lookup and P.formatUUID(lookup.id)
+        if not uuidBytes or not uuid then
+            completeMinecraftProfileRequest(cacheEntry, nil)
+            return
+        end
+
+        http.Fetch(textureBase .. "/" .. tostring(lookup.id) .. "?unsigned=false", function(profileBody)
+            local decoded = util.JSONToTable(profileBody or "")
+            local textures
+            for _, property in ipairs((decoded and decoded.properties) or {}) do
+                if property.name == "textures" and property.value and property.signature then
+                    textures = {
+                        name = "textures",
+                        value = property.value,
+                        signature = property.signature
+                    }
+                    break
+                end
+            end
+
+            completeMinecraftProfileRequest(cacheEntry, {
+                uuid = uuid,
+                uuidBytes = uuidBytes,
+                properties = textures and { textures } or {}
+            })
+        end, function(err)
+            log("failed to fetch Minecraft textures for " .. safeName .. ": " .. tostring(err))
+            completeMinecraftProfileRequest(cacheEntry, {
+                uuid = uuid,
+                uuidBytes = uuidBytes,
+                properties = {}
+            })
+        end)
+    end, function(err)
+        log("failed to look up Minecraft profile for " .. safeName .. ": " .. tostring(err))
+        completeMinecraftProfileRequest(cacheEntry, nil)
+    end)
+end
+
 local function sendTabListHeader(client)
     sendPacket(client, 0x4A,
         chatJson("MC+GM Bridge") ..
@@ -795,13 +996,13 @@ local function sendTabListHeader(client)
     )
 end
 
-local function sendPlayerListAdd(client, uuidBytes, name, displayName, ping)
+local function sendPlayerListAdd(client, uuidBytes, name, displayName, ping, properties)
     sendPacket(client, 0x2E,
         P.writeVarInt(0) ..
         P.writeVarInt(1) ..
         uuidBytes ..
         P.writeString(name) ..
-        P.writeVarInt(0) ..
+        writeProfileProperties(properties) ..
         P.writeVarInt(1) ..
         P.writeVarInt(ping or 0) ..
         P.writeBool(true) ..
@@ -838,12 +1039,27 @@ end
 local function addMinecraftPlayerToList(client, other)
     if not other or not other.username then return end
     if other == client then return end
+    local profile = other.minecraftProfile
     sendPlayerListAdd(
         client,
-        P.writeUUIDBytes(other.entityId),
-        shortPlayerName("MC_", other.username),
+        profileUuidBytes(profile, other.entityId),
+        other.username,
         "[MC] " .. other.username,
-        0
+        0,
+        profile and profile.properties
+    )
+end
+
+local function addMinecraftSelfToList(client)
+    if not client or not client.username then return end
+    local profile = client.minecraftProfile
+    sendPlayerListAdd(
+        client,
+        profileUuidBytes(profile, client.entityId),
+        client.username,
+        client.username,
+        0,
+        profile and profile.properties
     )
 end
 
@@ -864,19 +1080,20 @@ local function sendMinecraftPlayerSpawn(client, other)
 
     sendPacket(client, 0x05,
         P.writeVarInt(other.entityId) ..
-        P.writeUUIDBytes(other.entityId) ..
+        profileUuidBytes(other.minecraftProfile, other.entityId) ..
         P.writeDouble(other.mcPos.x) ..
         P.writeDouble(other.mcPos.y) ..
         P.writeDouble(other.mcPos.z) ..
         string.char(minecraftPlayerAngle(other.yaw)) ..
         string.char(minecraftPlayerAngle(other.pitch)) ..
-        "\255"
+        minecraftPlayerMetadata(other)
     )
 
     sendPacket(client, 0x36,
         P.writeVarInt(other.entityId) ..
         string.char(minecraftPlayerAngle(other.yaw))
     )
+    sendMinecraftPlayerMetadata(client, other)
 
     client.spawnedMinecraftEntities[other.entityId] = true
 end
@@ -944,6 +1161,10 @@ local function removeMinecraftPlayerFromViewer(client, other)
 
     sendDestroyEntity(client, other.entityId)
     sendPlayerListRemove(client, P.writeUUIDBytes(other.entityId))
+    local profileBytes = profileUuidBytes(other.minecraftProfile, other.entityId)
+    if profileBytes ~= P.writeUUIDBytes(other.entityId) then
+        sendPlayerListRemove(client, profileBytes)
+    end
 end
 
 refreshMinecraftPlayerForViewers = function(respawnedClient)
@@ -1459,13 +1680,17 @@ minecraftAngle = function(degrees)
     return math.floor((degrees % 360) * 256 / 360)
 end
 
+local function gmodEyeYawToMinecraft(yaw)
+    return minecraftAngle((tonumber(yaw) or 0) - 90)
+end
+
 local function sendGmodPlayerSpawn(client, ply)
     if not IsValid(ply) then return end
 
     local pos = vecToMinecraft(ply:GetPos())
     pos.y = pos.y + (C.gmod_player_minecraft_y_offset or 0)
     local angles = ply:EyeAngles()
-    local yaw = minecraftAngle(angles.y)
+    local yaw = gmodEyeYawToMinecraft(angles.y)
     local pitch = minecraftAngle(angles.p)
 
     if C.gmod_minecraft_entity_mode == "mob" then
@@ -1586,8 +1811,9 @@ local function sendGmodPlayerTeleport(client, ply)
 
     local pos = vecToMinecraft(ply:GetPos())
     pos.y = pos.y + (C.gmod_player_minecraft_y_offset or 0)
-    local yaw = minecraftAngle(ply:EyeAngles().y)
-    local pitch = minecraftAngle(ply:EyeAngles().p)
+    local angles = ply:EyeAngles()
+    local yaw = gmodEyeYawToMinecraft(angles.y)
+    local pitch = minecraftAngle(angles.p)
 
     sendPacket(client, 0x4C,
         P.writeVarInt(ply:EntIndex()) ..
@@ -1597,6 +1823,11 @@ local function sendGmodPlayerTeleport(client, ply)
         string.char(yaw) ..
         string.char(pitch) ..
         P.writeBool(ply:IsOnGround())
+    )
+
+    sendPacket(client, 0x36,
+        P.writeVarInt(ply:EntIndex()) ..
+        string.char(yaw)
     )
 end
 
@@ -1660,6 +1891,7 @@ local function sendJoinGame(client)
         string.char(0) ..
         P.writeVarInt(1)
     )
+    sendMinecraftSelfMetadata(client)
 end
 
 sendDeferredWorldSync = function(client)
@@ -1667,13 +1899,15 @@ sendDeferredWorldSync = function(client)
 
     log("sending deferred world sync to " .. tostring(client.username or client.entityId))
     sendTabListHeader(client)
+    addMinecraftSelfToList(client)
+    sendMinecraftSelfMetadata(client)
     sendMinecraftPlayersToList(client)
     sendMinecraftPlayersToMinecraft(client)
     sendGmodPlayersToMinecraft(client)
     if C.send_blocks_on_login then
         sendBridgeArenaBlocks(client)
     end
-    sendSystemChat(client, "Connected to the GMod bridge. GMod is the authority.")
+    sendSystemChat(client, "Connected to the GMod bridge..")
 end
 
 local function handleStatus(client, packet)
@@ -1710,6 +1944,27 @@ local function handleUseEntity(client, packet)
             end
             return
         end
+    end
+end
+
+local function handleClientSettings(client, packet)
+    local offset = 1
+    client.locale, offset = P.readString(packet.payload, offset)
+    if not client.locale then return end
+    client.viewDistance, offset = P.readByte(packet.payload, offset)
+    if not client.viewDistance then return end
+    client.chatMode, offset = P.readVarInt(packet.payload, offset)
+    if not client.chatMode then return end
+    local chatColors
+    chatColors, offset = P.readByte(packet.payload, offset)
+    if not chatColors then return end
+    client.chatColors = chatColors == 1
+    client.skinParts, offset = P.readByte(packet.payload, offset)
+    if not client.skinParts then return end
+    client.mainHand = P.readVarInt(packet.payload, offset)
+
+    if client.state == STATE_PLAY then
+        refreshMinecraftPlayerForViewers(client)
     end
 end
 
@@ -1758,7 +2013,7 @@ local function handleBlockPlacement(client, packet)
 
     local pos, offset = P.readPosition(packet.payload, 1)
     if not pos then
-        log((client.username or "MC") .. " sent place packet but position decode failed")
+        log((client.username or "MC") .. " sent place packet but  position decode failed")
         return
     end
 
@@ -1774,7 +2029,7 @@ local function handleBlockPlacement(client, packet)
     if C.debug_block_packets then
         log((client.username or "MC") .. " place face=" .. tostring(face) .. " base=" .. pos.x .. "," .. pos.y .. "," .. pos.z)
     end
-    log((client.username or "MC") .. " placed bridge block state=" .. tostring(state) .. " at " .. x .. "," .. y .. "," .. z)
+    log((client.username or "MC") .. " placed bridge its called this not because its vibe coded because the oigonal block i used was not a real minecraft block and one i custom made therefore i called it bridge block this is the idiot which called my work vibecodes fault for this rant in my code block state=" .. tostring(state) .. " at " .. x .. "," .. y .. "," .. z)
 end
 
 local function handleHandshake(client, packet)
@@ -1788,14 +2043,22 @@ local function handleHandshake(client, packet)
     client.state = client.nextState == 1 and STATE_STATUS or STATE_LOGIN
 end
 
-local function handleLogin(client, packet)
-    if packet.id ~= 0x00 then return end
-
-    local username = P.readString(packet.payload, 1) or ("mc_" .. client.entityId)
+local function sanitizeMinecraftUsername(username, entityId)
+    username = tostring(username or ("mc_" .. tostring(entityId or 0)))
     username = string.sub(string.gsub(username, "[^%w_]", ""), 1, 16)
-    if username == "" then username = "mc_" .. client.entityId end
+    if username == "" then username = "mc_" .. tostring(entityId or 0) end
+    return username
+end
 
+local function disconnectLogin(client, reason)
+    if not client then return end
+    sendPacket(client, 0x00, chatJson(tostring(reason or "Disconnected")))
+    client.dead = true
+end
+
+local function finishMinecraftLogin(client, username, profile, authMode)
     client.username = username
+    client.minecraftProfile = profile
     client.state = STATE_PLAY
     client.gmodPos = minecraftToVec(client.mcPos)
     client.mcHealth = C.minecraft_proxy_health
@@ -1803,7 +2066,12 @@ local function handleLogin(client, packet)
     client.selectedHotbarSlot = 0
     updateMinecraftProxy(client)
 
-    sendPacket(client, 0x02, P.writeString(P.writeUUID()) .. P.writeString(username))
+    if profile and profile.properties and #profile.properties > 0 then
+        log("loaded signed Minecraft textures for " .. username)
+    end
+
+    local loginUuid = profileUuidString(profile) or P.writeUUID()
+    sendPacket(client, 0x02, P.writeString(loginUuid) .. P.writeString(username))
     sendJoinGame(client)
     timer.Simple(C.defer_world_sync_after_login or 1, function()
         sendDeferredWorldSync(client)
@@ -1817,7 +2085,61 @@ local function handleLogin(client, packet)
         end
     end
     broadcastChat("[MC] " .. username .. " joined the bridge")
-    log(username .. " logged in in offline mode")
+    log(username .. " logged in in " .. tostring(authMode or "offline") .. " mode")
+end
+
+local function beginOfflineMinecraftLogin(client, username)
+    client.username = username
+
+    local finished = false
+    local function finish(profile)
+        if finished then
+            if profile and client and not client.dead and client.state == STATE_PLAY and client.username == username then
+                client.minecraftProfile = profile
+                log("loaded signed Minecraft textures for " .. username .. " after login")
+                sendPlayerListRemove(client, P.writeUUIDBytes(client.entityId))
+                sendPlayerListRemove(client, profileUuidBytes(profile, client.entityId))
+                addMinecraftSelfToList(client)
+                refreshMinecraftPlayerForViewers(client)
+            end
+            return
+        end
+        if not client or client.dead then return end
+        if C.require_minecraft_profile and not profile then
+            disconnectLogin(client, "This bridge requires a real Minecraft profile for skins/capes. Use your exact Java username.")
+            log("rejected " .. username .. " because no Mojang profile was found")
+            return
+        end
+        finished = true
+        finishMinecraftLogin(client, username, profile, "offline")
+    end
+
+    fetchMinecraftProfile(username, finish)
+
+    timer.Simple(C.minecraft_auth_timeout or 5, function()
+        if finished or not client or client.dead then return end
+        log("Minecraft profile lookup timed out for " .. username .. "; joining without skin/cape")
+        finish(nil)
+    end)
+end
+
+local function beginOnlineMinecraftLogin(client, username)
+    client.username = username
+    log(username .. " tried to log in with minecraft_online_mode enabled")
+    disconnectLogin(client, "Minecraft online-mode auth is enabled in config, but this bridge does not have a crypto/encrypted-socket backend yet. Disable minecraft_online_mode or add RSA/AES auth support.")
+end
+
+local function handleLogin(client, packet)
+    if packet.id ~= 0x00 then return end
+
+    local username = sanitizeMinecraftUsername(P.readString(packet.payload, 1), client.entityId)
+
+    if C.minecraft_online_mode then
+        beginOnlineMinecraftLogin(client, username)
+        return
+    end
+
+    beginOfflineMinecraftLogin(client, username)
 end
 
 local function handlePlay(client, packet)
@@ -1836,6 +2158,8 @@ local function handlePlay(client, packet)
         if action == 0 and (client.deadInMinecraft or (client.mcHealth or C.minecraft_proxy_health) <= 0) then
             respawnMinecraftClient(client)
         end
+    elseif packet.id == 0x04 then
+        handleClientSettings(client, packet)
     elseif packet.id == 0x0A then
         handleUseEntity(client, packet)
     elseif packet.id == 0x0B then
@@ -2006,8 +2330,6 @@ local function syncGmodPlayers()
     for _, ply in ipairs(player.GetAll()) do
         if IsValid(ply) then
             local pos = vecToMinecraft(ply:GetPos())
-            local yaw = minecraftAngle(ply:EyeAngles().y)
-            local pitch = minecraftAngle(ply:EyeAngles().p)
 
             for _, client in pairs(clients) do
                 if client.state == STATE_PLAY then
@@ -2156,7 +2478,7 @@ function MC_GM.Start()
     end
 
     socketLib = lib
-    server = assert(socketLib.bind("*", C.port))
+    server = assert(socketLib.bind(C.bind_host or "*", C.port))
     server:settimeout(0)
     loadWorldStorage()
     ensureBasePlatformBlocks()
@@ -2369,7 +2691,7 @@ function MC_GM.Start()
         if ent2:IsPlayer() and ent1.MCGM_BlockKey then return false end
     end)
 
-    log("listening for Minecraft " .. C.minecraft_version .. " clients on port " .. C.port)
+    log("listening for Minecraft " .. C.minecraft_version .. " backend clients on " .. tostring(C.bind_host or "*") .. ":" .. C.port)
 end
 
 function MC_GM.Stop()

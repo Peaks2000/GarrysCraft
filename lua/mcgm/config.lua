@@ -1,12 +1,27 @@
 MC_GM = MC_GM or {}
 
 MC_GM.Config = {
-    port = 25565,
+    bind_host = "127.0.0.1",
+    port = 25566,
+    auth_proxy_host = "0.0.0.0",
+    auth_proxy_port = 25565,
     motd = "GMod cross-play bridge",
     max_players = 32,
     protocol_version = 340,
     minecraft_version = "1.12.2",
     world_version = 1,
+    -- IMPORTANT: the Node auth proxy handles online-mode auth before forwarding
+    -- verified users to this local-only Lua bridge backend.
+    minecraft_auth_proxy_enabled = true,
+    minecraft_online_mode = false,
+    enable_minecraft_profile_textures = true,
+    require_minecraft_profile = true,
+    minecraft_default_skin_parts = 127,
+    force_minecraft_skin_parts = true,
+    minecraft_profile_lookup_endpoint = "https://api.mojang.com/users/profiles/minecraft",
+    minecraft_profile_textures_endpoint = "https://sessionserver.mojang.com/session/minecraft/profile",
+    minecraft_auth_session_server = "https://sessionserver.mojang.com/session/minecraft/hasJoined",
+    minecraft_auth_timeout = 5,
 
     world_scale = 32,
     gmod_origin = Vector(0, 0, 2048),
@@ -36,6 +51,9 @@ MC_GM.Config = {
     minecraft_proxy_model = "models/player/kleiner.mdl",
     minecraft_proxy_mins = Vector(-16, -16, 0),
     minecraft_proxy_maxs = Vector(16, 16, 72),
+    minecraft_proxy_head_bones = { "ValveBiped.Bip01_Head1", "ValveBiped.Bip01_Neck1" },
+    minecraft_proxy_head_pitch_scale = 1,
+    minecraft_proxy_head_yaw_scale = 0.35,
     enable_minecraft_nametags = true,
     debug_minecraft_movement = false,
     enable_gmod_equipment_sync = true,

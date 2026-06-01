@@ -268,6 +268,30 @@ function P.writeUUIDBytes(seed)
     return "\0\0\0\0\0\0\0\0" .. P.writeInt(0) .. P.writeInt(seed)
 end
 
+function P.writeUUIDString(value)
+    local hex = string.lower(tostring(value or ""))
+    hex = string.gsub(hex, "[^0-9a-f]", "")
+    if #hex ~= 32 then return nil end
+
+    local out = {}
+    for i = 1, 32, 2 do
+        out[#out + 1] = string.char(tonumber(string.sub(hex, i, i + 1), 16))
+    end
+    return table.concat(out)
+end
+
+function P.formatUUID(value)
+    local hex = string.lower(tostring(value or ""))
+    hex = string.gsub(hex, "[^0-9a-f]", "")
+    if #hex ~= 32 then return nil end
+
+    return string.sub(hex, 1, 8) .. "-" ..
+        string.sub(hex, 9, 12) .. "-" ..
+        string.sub(hex, 13, 16) .. "-" ..
+        string.sub(hex, 17, 20) .. "-" ..
+        string.sub(hex, 21, 32)
+end
+
 function P.writePosition(x, y, z)
     x = band(math.floor(x or 0), 0x3FFFFFF)
     y = band(math.floor(y or 0), 0xFFF)

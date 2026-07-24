@@ -11,7 +11,7 @@ authentication is performed.
 
 ## What works in this prototype
 
-- Minecraft Java 1.12.2 offline-mode handshake/login path. (if somone wants to try to get 1.13 working please make a PR although it must also still support 1.12)
+- Minecraft Java 1.12.2 offline mode and online mode handshake/login path. (if somone wants to try to get 1.13 working please make a PR although it must also still support 1.12)
 - Minecraft server list status/ping.
 - Chat forwarding (Both sides)
 - Position forwarding:

@@ -11,19 +11,16 @@ authentication is performed.
 
 ## What works in this prototype
 
-- Minecraft Java 1.12.2 offline-mode handshake/login path.
-- Spawn chunks include a simple floor sampled from GMod brush geometry.
+- Minecraft Java 1.12.2 offline-mode handshake/login path. (if somone wants to try to get 1.13 working please make a PR although it must also still support 1.12)
 - Minecraft server list status/ping.
-- Chat forwarding:
-  - Minecraft chat -> GMod chat.
-  - GMod chat -> Minecraft chat.
+- Chat forwarding (Both sides)
 - Position forwarding:
   - Minecraft movement packets are tracked in GMod.
   - Minecraft players are shown in GMod as simple moving proxy models.
   - GMod players are spawned into Minecraft as player entities and teleported
     as they move.
   - Minecraft tab list contains `[MC]` and `[GMod]` entries.
-- Cross-game interaction:
+- Cross-game interaction: (buggy)
   - GMod bullets and damage can hurt Minecraft proxies.
   - Minecraft users can attack visible GMod placeholders.
   - Minecraft chat from MC users is rebroadcast with a `[MC]` prefix.

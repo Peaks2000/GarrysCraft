@@ -2,9 +2,7 @@
 
 Experimental Minecraft Java <-> Garry's Mod bridge.
 
-The authority lives in the GMod server. Minecraft clients connect directly to a
-TCP listener hosted by the addon, using Minecraft offline mode, so no Microsoft
-authentication is performed.
+No real Minecraft Server is involved which I thought was awesome
 
 ##Bugs and quirks
 -Garry's Mod player must be online for Minecraft players to join

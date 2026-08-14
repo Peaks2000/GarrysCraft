@@ -26,12 +26,8 @@ authentication is performed.
   - Minecraft chat from MC users is rebroadcast with a `[MC]` prefix.
   - Minecraft chat commands `/crowbar`, `/blast`, `/where`, and `/sync`
     affect GMod or refresh the shared arena.
-- Shared arena:
+- Shared arena(barley functional does not work well):
   - GMod players are spawned onto the bridge platform by default.
-  - Nearby GMod platform/prop hitboxes are projected into Minecraft as blocks.
-- Experimental prop projection:
-  - Nearby GMod physics props are sampled and sent as simple Minecraft block
-    changes.
   shared blocks
 ## Requirements
 
